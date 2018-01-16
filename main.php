@@ -1,86 +1,70 @@
 <?php
-/* .env contains two constants: The JWT and an array DOMAINS with the domain(s) for which reporting should be enabled */
-require './.env';
-
-function createReports(){
-    foreach(DOMAINS as $domain) {
-        $view = getView($domain);
-        $params = getParamsFromView($view);
-        $data = getDataWithParams($domain, $params);
-        prepReportFile($data);
-        sendReport();
-    }
-}
+require_once './mail_helper.php';
+require_once './configuration_handler.php';
+require_once './API_calls_and_parsing.php';
+require_once './reportFile_generator.php';
 
 createReports();
 
-function getView($domain){
-    return sendRequest($domain,'userdata', null);
-}
+function createReports()
+{
+    loadConfig();
+    global $config;
+    foreach ($config as $domain => $settings) {
+        if (!$config[$domain]) {
+            continue;
+        }
 
-function getParamsFromView($view){
-    $views = $view->results->data->views;
-    $reportView = null;
-    foreach($views as $v){
-        if($v->name === 'report'){
-            $reportView = $v;
+        $view = getView($domain);
+
+        if (!$view) {
+            continue;
+        } elseif (reportIsDue($domain, $view)) {
+            $params = getParamsFromView($view);
+            $data = getReportDataWithParams($domain, $params);
+            generateReportFile($data);
+            sendReport($domain);
+            updateConfigWithNewTS($domain);
+        } else {
+            trigger_error("There's no report due for $domain at this time");
         }
     }
-    if(!$reportView){
-        trigger_error("No report view for ".$views[0]->domain);
-        return false;
-    }
-    $range = $reportView->baseRange;
-    $comparison = $reportView->comparisonRange;
-    $metrics = $reportView->metrics;
-    $sortedMetric = $reportView->sortedMetric;
-    $dimensions = $reportView->dimensions;
-    $timezone = $reportView->timezone;
-    $parsedView = array(
-        "base_timeframe"=>$range,
-        "comparison_timeframe"=>$comparison,
-        "timezone"=>$timezone,
-        "metrics[]"=>$metrics,
-        "order_by"=>$sortedMetric,
-        "dimensions[]"=>$dimensions
-    );
-    return $parsedView;
+    writeUpdatedConfigAndQuit();
 }
 
-function getDataWithParams($domain, $parsedView){
-    return sendRequest($domain,'metrics', $parsedView);
-}
-
-function prepReportFile($data){}
-
-function sendReport(){}
-
-function sendRequest($domain,$endpoint,$params){
-    if($params === null){
-        $paramString = '';
+function reportIsDue($domain, $view)
+{
+    global $config;
+    $freq = $config[$domain]["freq"];
+    $ts = (int)$config[$domain]["ts"];
+    if ($freq === null || $ts === null) {
+        $config[$domain]["freq"] = $view->name;
+        $config[$domain]["ts"] = time();
+        return true;
     }
-    else{
-        $paramString = '?'.http_build_query($params);
-    }
-    $url = 'http://api-analytics-beta.cloudwp.io/'.$domain.'/'.$endpoint.$paramString;
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array(
-        'authorization: Bearer '.JWT,
-        'accept: application/json',
-        'authority: api-analytics-beta.cloudwp.io'
-        )
-    );
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    $res = curl_exec($ch);
-
-    if(curl_errno($ch)){
-        trigger_error("Error performing HTTP request to API: ".curl_error($ch));
-        curl_close($ch);
+    if (strpos($freq, "daily") !== false
+        && (time() > $ts + (24 * 60 * 60))) {
+        return true;
+    } elseif (strpos($freq, "weekly") !== false
+        && (time() > $ts + (7 * 24 * 60 * 60))) {
+        return true;
+    } else {
         return false;
     }
-    else{
-        $data = json_decode($res);
-        curl_close($ch);
-        return $data;
+}
+
+function sendReport($domain)
+{
+    global $config;
+    $my_file = REPORT_FILENAME;
+    $my_name = "Surge Team";
+    $my_mail = "team@surge.io";
+    $my_replyto = "robin@surge.io";
+    $my_subject = "Your report for " . $domain;
+    $my_message = wordwrap("Hi,\n\nHere's your Surge report for $domain. You can change the frequency of your reports by naming your report view either dailyReport or weeklyReport.\n\nHave a nice day!\n\nKind regards,\nSurge.io Team");
+    if (!mail_attachment($my_file, $config[$domain]["email"], $my_mail, $my_name, $my_replyto, $my_subject, $my_message)) {
+        trigger_error("Sending report via email to {$config[$domain]["email"]} failed!");
+    } else{
+        print_r("report for $domain successfully sent to {$config[$domain]["email"]}!");
     }
 }
